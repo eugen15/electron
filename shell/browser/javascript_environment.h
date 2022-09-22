@@ -18,11 +18,13 @@ class MultiIsolatePlatform;
 
 namespace electron {
 
+enum class NodeEnvironmentType { kNodeMode, kNormal };
+
 class MicrotasksRunner;
 // Manage the V8 isolate and context automatically.
 class JavascriptEnvironment {
  public:
-  explicit JavascriptEnvironment(uv_loop_t* event_loop);
+  explicit JavascriptEnvironment(uv_loop_t* event_loop, NodeEnvironmentType type);
   ~JavascriptEnvironment();
 
   // disable copy
@@ -34,9 +36,6 @@ class JavascriptEnvironment {
 
   node::MultiIsolatePlatform* platform() const { return platform_; }
   v8::Isolate* isolate() const { return isolate_; }
-  v8::Local<v8::Context> context() const {
-    return v8::Local<v8::Context>::New(isolate_, context_);
-  }
 
   static v8::Isolate* GetIsolate();
 
@@ -46,9 +45,8 @@ class JavascriptEnvironment {
   node::MultiIsolatePlatform* platform_;
 
   v8::Isolate* isolate_;
-  gin::IsolateHolder isolate_holder_;
+  std::unique_ptr<gin::IsolateHolder> isolate_holder_;
   v8::Locker locker_;
-  v8::Global<v8::Context> context_;
 
   std::unique_ptr<MicrotasksRunner> microtasks_runner_;
 };

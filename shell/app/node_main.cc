@@ -196,7 +196,7 @@ int NodeMain(int argc, char* argv[]) {
     uv_loop_configure(loop, UV_METRICS_IDLE_TIME);
 
     // Initialize gin::IsolateHolder.
-    JavascriptEnvironment gin_env(loop);
+    JavascriptEnvironment gin_env(loop, NodeEnvironmentType::kNodeMode);
 
     v8::Isolate* isolate = gin_env.isolate();
 
@@ -213,12 +213,12 @@ int NodeMain(int argc, char* argv[]) {
       uint64_t env_flags = node::EnvironmentFlags::kDefaultFlags |
                            node::EnvironmentFlags::kHideConsoleWindows;
       env = node::CreateEnvironment(
-          isolate_data, gin_env.context(), result.args, result.exec_args,
+          isolate_data, isolate->GetCurrentContext(), result.args,
+          result.exec_args,
           static_cast<node::EnvironmentFlags::Flags>(env_flags));
       CHECK_NE(nullptr, env);
 
-      node::IsolateSettings is;
-      node::SetIsolateUpForNode(isolate, is);
+      node::SetIsolateUpForNode(isolate);
 
       gin_helper::Dictionary process(isolate, env->process_object());
       process.SetMethod("crash", &ElectronBindings::Crash);

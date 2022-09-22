@@ -73,21 +73,35 @@ struct base::trace_event::TraceValue::Helper<
 
 namespace electron {
 
-JavascriptEnvironment::JavascriptEnvironment(uv_loop_t* event_loop)
+namespace {
+  auto CreateIsolateHolder(v8::Isolate* isolate, NodeEnvironmentType type) {
+    std::unique_ptr<v8::Isolate::CreateParams> create_params =
+    gin::IsolateHolder::getDefaultIsolateParams();
+
+    if (type == NodeEnvironmentType::kNodeMode) {
+      create_params->only_terminate_in_safe_scope = false;
+    }
+
+    return std::make_unique<gin::IsolateHolder>(
+                        base::ThreadTaskRunnerHandle::Get(),
+                        gin::IsolateHolder::kSingleThread,
+                        gin::IsolateHolder::IsolateType::kUtility,
+                        std::move(create_params),
+                        gin::IsolateHolder::IsolateCreationMode::kNormal,
+                        isolate);
+  }
+}
+
+JavascriptEnvironment::JavascriptEnvironment(uv_loop_t* event_loop, NodeEnvironmentType type)
     : isolate_(Initialize(event_loop)),
-      isolate_holder_(base::ThreadTaskRunnerHandle::Get(),
-                      gin::IsolateHolder::kSingleThread,
-                      gin::IsolateHolder::kAllowAtomicsWait,
-                      gin::IsolateHolder::IsolateType::kUtility,
-                      gin::IsolateHolder::IsolateCreationMode::kNormal,
-                      nullptr,
-                      nullptr,
-                      isolate_),
+      isolate_holder_(CreateIsolateHolder(isolate_, type)),
       locker_(isolate_) {
   isolate_->Enter();
+
   v8::HandleScope scope(isolate_);
   auto context = node::NewContext(isolate_);
-  context_ = v8::Global<v8::Context>(isolate_, context);
+  CHECK(!context.IsEmpty());
+
   context->Enter();
 }
 
@@ -97,7 +111,7 @@ JavascriptEnvironment::~JavascriptEnvironment() {
 
   {
     v8::HandleScope scope(isolate_);
-    context_.Get(isolate_)->Exit();
+    isolate_->GetCurrentContext()->Exit();
   }
   isolate_->Exit();
   g_isolate = nullptr;
