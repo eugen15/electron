@@ -44,7 +44,7 @@ jobs:
     - name: (Optionally) Generate Commit Diff
       if: ${{ env.APPVEYOR_IMAGE_VERSION }}
       run: |
-        diff -B appveyor.yml appveyor2.yml > appveyor.diff || true
+        diff -w -B appveyor.yml appveyor2.yml > appveyor.diff || true
         patch -f appveyor.yml < appveyor.diff
         rm appveyor2.yml appveyor.diff
     - name: (Optionally) Commit and Pull Request
