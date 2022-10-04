@@ -74,25 +74,26 @@ struct base::trace_event::TraceValue::Helper<
 namespace electron {
 
 namespace {
-  auto CreateIsolateHolder(v8::Isolate* isolate, NodeEnvironmentType type) {
-    std::unique_ptr<v8::Isolate::CreateParams> create_params =
-    gin::IsolateHolder::getDefaultIsolateParams();
 
-    if (type == NodeEnvironmentType::kNodeMode) {
-      create_params->only_terminate_in_safe_scope = false;
-    }
+gin::IsolateHolder CreateIsolateHolder(v8::Isolate* isolate,
+                                       NodeEnvironmentType type) {
+  std::unique_ptr<v8::Isolate::CreateParams> create_params =
+      gin::IsolateHolder::getDefaultIsolateParams();
 
-    return std::make_unique<gin::IsolateHolder>(
-                        base::ThreadTaskRunnerHandle::Get(),
-                        gin::IsolateHolder::kSingleThread,
-                        gin::IsolateHolder::IsolateType::kUtility,
-                        std::move(create_params),
-                        gin::IsolateHolder::IsolateCreationMode::kNormal,
-                        isolate);
+  if (type == NodeEnvironmentType::kNodeMode) {
+    create_params->only_terminate_in_safe_scope = false;
   }
+
+  return gin::IsolateHolder(
+      base::ThreadTaskRunnerHandle::Get(), gin::IsolateHolder::kSingleThread,
+      gin::IsolateHolder::IsolateType::kUtility, std::move(create_params),
+      gin::IsolateHolder::IsolateCreationMode::kNormal, isolate);
 }
 
-JavascriptEnvironment::JavascriptEnvironment(uv_loop_t* event_loop, NodeEnvironmentType type)
+}  // namespace
+
+JavascriptEnvironment::JavascriptEnvironment(uv_loop_t* event_loop,
+                                             NodeEnvironmentType type)
     : isolate_(Initialize(event_loop)),
       isolate_holder_(CreateIsolateHolder(isolate_, type)),
       locker_(isolate_) {

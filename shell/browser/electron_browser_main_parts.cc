@@ -256,7 +256,7 @@ void ElectronBrowserMainParts::PostEarlyInitialization() {
   // The ProxyResolverV8 has setup a complete V8 environment, in order to
   // avoid conflicts we only initialize our V8 environment after that.
   js_env_ = std::make_unique<JavascriptEnvironment>(
-    node_bindings_->uv_loop(), NodeEnvironmentType::kNormal);
+      node_bindings_->uv_loop(), NodeEnvironmentType::kNormal);
 
   v8::HandleScope scope(js_env_->isolate());
 
