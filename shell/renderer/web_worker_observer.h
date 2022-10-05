@@ -33,6 +33,7 @@ class WebWorkerObserver {
 
   std::unique_ptr<NodeBindings> node_bindings_;
   std::unique_ptr<ElectronBindings> electron_bindings_;
+  bool has_node_integration_ = true;
 };
 
 }  // namespace electron

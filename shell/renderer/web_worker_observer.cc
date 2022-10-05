@@ -10,6 +10,7 @@
 #include "shell/common/gin_helper/event_emitter_caller.h"
 #include "shell/common/node_bindings.h"
 #include "shell/common/node_includes.h"
+#include "third_party/blink/renderer/core/execution_context/execution_context.h"
 
 namespace electron {
 
@@ -37,6 +38,10 @@ WebWorkerObserver::WebWorkerObserver()
 
 WebWorkerObserver::~WebWorkerObserver() {
   lazy_tls.Pointer()->Set(nullptr);
+
+  if (!has_node_integration_)
+    return;
+
   // Destroying the node environment will also run the uv loop,
   // Node.js expects `kExplicit` microtasks policy and will run microtasks
   // checkpoints after every call into JavaScript. Since we use a different
@@ -50,6 +55,18 @@ WebWorkerObserver::~WebWorkerObserver() {
 
 void WebWorkerObserver::WorkerScriptReadyForEvaluation(
     v8::Local<v8::Context> worker_context) {
+  auto* execution_context = blink::ExecutionContext::From(worker_context);
+
+  // We do not create a Node.js environment in service or shared workers
+  // owing to an inability to customize sandbox policies in these workers
+  // given that they're run out-of-process.
+  bool is_service_worker = execution_context->IsServiceWorkerGlobalScope();
+  bool is_shared_worker = execution_context->IsSharedWorkerGlobalScope();
+  if (is_service_worker || is_shared_worker) {
+    has_node_integration_ = false;
+    return;
+  }
+
   v8::Context::Scope context_scope(worker_context);
   auto* isolate = worker_context->GetIsolate();
   v8::MicrotasksScope microtasks_scope(
@@ -68,16 +85,10 @@ void WebWorkerObserver::WorkerScriptReadyForEvaluation(
   node::Environment* env =
       node_bindings_->CreateEnvironment(worker_context, nullptr);
 
-  // Add Electron extended APIs.
+  // Add Electron extended APIs, wrap uv loop, and begin polling.
   electron_bindings_->BindTo(env->isolate(), env->process_object());
-
-  // Load everything.
   node_bindings_->LoadEnvironment(env);
-
-  // Make uv loop being wrapped by window context.
   node_bindings_->set_uv_env(env);
-
-  // Give the node loop a run to make sure everything is ready.
   node_bindings_->StartPolling();
 }
 
