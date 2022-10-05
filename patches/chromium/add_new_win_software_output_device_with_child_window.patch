@@ -1,0 +1,462 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Eugen <97041180+eugen15@users.noreply.github.com>
+Date: Wed, 5 Oct 2022 16:43:41 -0400
+Subject: add new win software output device with child window
+
+
+diff --git a/components/viz/service/BUILD.gn b/components/viz/service/BUILD.gn
+index a672c74893f0c9a2774beec98734faf58a17cbf3..866aae4c44c41653ef79f73d7096eba974f566c3 100644
+--- a/components/viz/service/BUILD.gn
++++ b/components/viz/service/BUILD.gn
+@@ -363,6 +363,8 @@ viz_component("service") {
+       "display_embedder/output_device_backing.h",
+       "display_embedder/software_output_device_win.cc",
+       "display_embedder/software_output_device_win.h",
++      "display_embedder/software_output_child_window_win.cc",
++      "display_embedder/software_output_child_window_win.h",
+     ]
+   }
+ 
+diff --git a/components/viz/service/display_embedder/output_surface_provider_impl.cc b/components/viz/service/display_embedder/output_surface_provider_impl.cc
+index c41e9566b9a4d32cb1d0cb3e8c199191d20945f2..f62ab0a1381afa8be1ddb55c754202da87ac9cbb 100644
+--- a/components/viz/service/display_embedder/output_surface_provider_impl.cc
++++ b/components/viz/service/display_embedder/output_surface_provider_impl.cc
+@@ -104,6 +104,7 @@ OutputSurfaceProviderImpl::CreateGpuDependency(
+     bool gpu_compositing,
+     gpu::SurfaceHandle surface_handle,
+     const RendererSettings& renderer_settings) {
++
+   if (!gpu_compositing)
+     return nullptr;
+ 
+@@ -113,6 +114,7 @@ OutputSurfaceProviderImpl::CreateGpuDependency(
+         gpu_service_impl_, surface_handle);
+     return std::make_unique<DisplayCompositorMemoryAndTaskController>(
+         std::move(skia_deps));
++
+   } else {
+     DCHECK(task_executor_);
+     gpu::ScopedAllowScheduleGpuTask allow_schedule_gpu_task;
+@@ -140,7 +142,7 @@ std::unique_ptr<OutputSurface> OutputSurfaceProviderImpl::CreateOutputSurface(
+ 
+   if (!gpu_compositing) {
+     output_surface = std::make_unique<SoftwareOutputSurface>(
+-        CreateSoftwareOutputDeviceForPlatform(surface_handle, display_client, offscreen));
++        CreateSoftwareOutputDeviceForPlatform(surface_handle, display_client, gpu_service_impl_, offscreen));
+   } else if (renderer_settings.use_skia_renderer) {
+     DCHECK(gpu_dependency);
+     {
+@@ -246,6 +248,7 @@ std::unique_ptr<SoftwareOutputDevice>
+ OutputSurfaceProviderImpl::CreateSoftwareOutputDeviceForPlatform(
+     gpu::SurfaceHandle surface_handle,
+     mojom::DisplayClient* display_client,
++    GpuServiceImpl* gpu_service_impl,
+     bool offscreen) {
+   if (headless_)
+     return std::make_unique<SoftwareOutputDevice>();
+@@ -263,7 +266,7 @@ OutputSurfaceProviderImpl::CreateSoftwareOutputDeviceForPlatform(
+ 
+ #if defined(OS_WIN)
+   return CreateSoftwareOutputDeviceWin(surface_handle, &output_device_backing_,
+-                                       display_client);
++                                       display_client, gpu_service_impl);
+ #elif defined(OS_APPLE)
+   return std::make_unique<SoftwareOutputDeviceMac>(task_runner_);
+ #elif defined(OS_ANDROID)
+diff --git a/components/viz/service/display_embedder/output_surface_provider_impl.h b/components/viz/service/display_embedder/output_surface_provider_impl.h
+index c756e1c5b4bda1978d27fd55fba1e4531dbeed8a..ad207380564b146734261745c2e88917f51a9432 100644
+--- a/components/viz/service/display_embedder/output_surface_provider_impl.h
++++ b/components/viz/service/display_embedder/output_surface_provider_impl.h
+@@ -73,6 +73,7 @@ class VIZ_SERVICE_EXPORT OutputSurfaceProviderImpl
+   std::unique_ptr<SoftwareOutputDevice> CreateSoftwareOutputDeviceForPlatform(
+       gpu::SurfaceHandle surface_handle,
+       mojom::DisplayClient* display_client,
++      GpuServiceImpl* gpu_service_impl,
+       bool offscreen);
+ 
+   const raw_ptr<GpuServiceImpl> gpu_service_impl_;
+diff --git a/components/viz/service/display_embedder/software_output_child_window_win.cc b/components/viz/service/display_embedder/software_output_child_window_win.cc
+new file mode 100644
+index 0000000000000000000000000000000000000000..7f8096f727dfae6e30b2e825636d940bfe6daca8
+--- /dev/null
++++ b/components/viz/service/display_embedder/software_output_child_window_win.cc
+@@ -0,0 +1,159 @@
++// Copyright 2017 The Chromium Authors. All rights reserved.
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "components/viz/service/display_embedder/software_output_child_window_win.h"
++
++#include <memory>
++
++#include "base/bind.h"
++#include "base/compiler_specific.h"
++#include "base/debug/alias.h"
++#include "base/logging.h"
++#include "base/memory/weak_ptr.h"
++#include "base/message_loop/message_pump_type.h"
++#include "base/win/wrapped_window_proc.h"
++#include "ui/gfx/win/hwnd_util.h"
++#include "ui/gfx/win/window_impl.h"
++
++namespace viz {
++
++namespace {
++
++ATOM g_window_class;
++
++// This runs on the window owner thread.
++void InitializeWindowClass() {
++  if (g_window_class)
++    return;
++
++  WNDCLASSEX intermediate_class;
++  base::win::InitializeWindowClass(
++      L"Intermediate Software Output Device Window",
++      &base::win::WrappedWindowProc<::DefWindowProc>, CS_OWNDC, 0, 0, nullptr,
++      reinterpret_cast<HBRUSH>(GetStockObject(BLACK_BRUSH)), nullptr, nullptr,
++      nullptr, &intermediate_class);
++  g_window_class = RegisterClassEx(&intermediate_class);
++  if (!g_window_class) {
++    LOG(ERROR) << "RegisterClass failed.";
++    return;
++  }
++}
++
++// Hidden popup window  used as a parent for the child surface window.
++// Must be created and destroyed on the thread.
++class HiddenPopupWindow : public gfx::WindowImpl {
++ public:
++  static HWND Create() {
++    gfx::WindowImpl* window = new HiddenPopupWindow;
++
++    window->set_window_style(WS_POPUP);
++    window->set_window_ex_style(WS_EX_TOOLWINDOW);
++    window->Init(GetDesktopWindow(), gfx::Rect());
++    EnableWindow(window->hwnd(), FALSE);
++    // The |window| instance is now owned by the window user data.
++    DCHECK_EQ(window, gfx::GetWindowUserData(window->hwnd()));
++    return window->hwnd();
++  }
++
++  static void Destroy(HWND window) {
++    // This uses the fact that the window user data contains a pointer
++    // to gfx::WindowImpl instance.
++    gfx::WindowImpl* window_data =
++        reinterpret_cast<gfx::WindowImpl*>(gfx::GetWindowUserData(window));
++    DCHECK_EQ(window, window_data->hwnd());
++    DestroyWindow(window);
++    delete window_data;
++  }
++
++ private:
++  // Explicitly do nothing in Close. We do this as some external apps may get a
++  // handle to this window and attempt to close it.
++  void OnClose() {}
++
++  CR_BEGIN_MSG_MAP_EX(HiddenPopupWindow)
++    CR_MSG_WM_CLOSE(OnClose)
++  CR_END_MSG_MAP()
++
++  CR_MSG_MAP_CLASS_DECLARATIONS(HiddenPopupWindow)
++};
++
++// This runs on the window owner thread.
++void CreateWindowsOnThread(const gfx::Size& size,
++                           base::WaitableEvent* event,
++                           HWND* child_window,
++                           HWND* parent_window) {
++  InitializeWindowClass();
++  DCHECK(g_window_class);
++
++  // Create hidden parent window on the current thread.
++  *parent_window = HiddenPopupWindow::Create();
++  // Create child window.
++  HWND window = CreateWindowEx(
++      WS_EX_LAYERED | WS_EX_TRANSPARENT,
++      reinterpret_cast<wchar_t*>(g_window_class), L"",
++      WS_CLIPSIBLINGS | WS_CHILDWINDOW | WS_DISABLED | WS_VISIBLE, 0, 0, size.width(),
++      size.height(), *parent_window, nullptr, nullptr, nullptr);
++  
++  if (!window) {
++    logging::SystemErrorCode error = logging::GetLastSystemErrorCode();
++    base::debug::Alias(&error);
++    CHECK(false);
++  }
++  *child_window = window;
++  event->Signal();
++}
++
++// This runs on the main thread after the window was destroyed on window owner
++// thread.
++void DestroyThread(std::unique_ptr<base::Thread> thread) {
++  thread->Stop();
++}
++
++// This runs on the window owner thread.
++void DestroyWindowsOnThread(HWND child_window, HWND hidden_popup_window) {
++  DestroyWindow(child_window);
++  HiddenPopupWindow::Destroy(hidden_popup_window);
++}
++
++}  // namespace
++
++SoftwareOutputChildWindowWin::SoftwareOutputChildWindowWin(HWND parent_window)
++    : parent_window_(parent_window) {}
++
++SoftwareOutputChildWindowWin::SoftwareOutputChildWindowWin(
++    SoftwareOutputChildWindowWin&&) noexcept = default;
++
++void SoftwareOutputChildWindowWin::Initialize() {
++  if (window_)
++    return;
++
++  thread_ = std::make_unique<base::Thread>("Window owner thread");
++  base::Thread::Options options(base::MessagePumpType::UI, 0);
++  thread_->StartWithOptions(std::move(options));
++
++  base::WaitableEvent event(base::WaitableEvent::ResetPolicy::AUTOMATIC,
++                            base::WaitableEvent::InitialState::NOT_SIGNALED);
++
++  RECT window_rect;
++  GetClientRect(parent_window_, &window_rect);
++
++  thread_->task_runner()->PostTask(
++      FROM_HERE,
++      base::BindOnce(&CreateWindowsOnThread, gfx::Rect(window_rect).size(),
++                     &event, &window_, &initial_parent_window_));
++  event.Wait();
++}
++
++SoftwareOutputChildWindowWin::~SoftwareOutputChildWindowWin() {
++  if (thread_) {
++    scoped_refptr<base::TaskRunner> task_runner = thread_->task_runner();
++    task_runner->PostTaskAndReply(
++        FROM_HERE,
++        base::BindOnce(&DestroyWindowsOnThread, window_,
++                       initial_parent_window_),
++        base::BindOnce(&DestroyThread, std::move(thread_)));
++  }
++}
++
++}  // namespace viz
+diff --git a/components/viz/service/display_embedder/software_output_child_window_win.h b/components/viz/service/display_embedder/software_output_child_window_win.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..c3d03a76f5c18cda6aa1b36ee332162ebb41eca5
+--- /dev/null
++++ b/components/viz/service/display_embedder/software_output_child_window_win.h
+@@ -0,0 +1,44 @@
++// Copyright 2017 The Chromium Authors. All rights reserved.
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef COMPONENTS_VIZ_SERVICE_DISPLAY_EMBEDDER_SOFTWARE_OUTPUT_DEVICE_WINDOW_WIN_H_
++#define COMPONENTS_VIZ_SERVICE_DISPLAY_EMBEDDER_SOFTWARE_OUTPUT_DEVICE_WINDOW_WIN_H_
++
++#include "base/memory/weak_ptr.h"
++#include "base/task/task_runner.h"
++#include "base/threading/thread.h"
++#include "components/viz/service/viz_service_export.h"
++
++#include <windows.h>
++
++namespace viz {
++
++class VIZ_SERVICE_EXPORT SoftwareOutputChildWindowWin {
++ public:
++  explicit SoftwareOutputChildWindowWin(HWND parent_window);
++
++  SoftwareOutputChildWindowWin(const SoftwareOutputChildWindowWin&) = delete;
++  SoftwareOutputChildWindowWin& operator=(const SoftwareOutputChildWindowWin&) = delete;
++
++	SoftwareOutputChildWindowWin(SoftwareOutputChildWindowWin&&) noexcept;
++
++  ~SoftwareOutputChildWindowWin();
++
++  void Initialize();
++  HWND window() const { return window_; }
++
++ private:
++  // The window owner thread.
++  std::unique_ptr<base::Thread> thread_;
++  // The eventual parent of the window living in the browser process.
++  const HWND parent_window_;
++  HWND window_ = nullptr;
++  // The window is initially created with this parent window. We need to keep it
++  // around so that we can destroy it at the end.
++  HWND initial_parent_window_ = nullptr;
++};
++
++}  // namespace viz
++
++#endif  // COMPONENTS_VIZ_SERVICE_DISPLAY_EMBEDDER_SOFTWARE_OUTPUT_DEVICE_WINDOW_WIN_H_
+diff --git a/components/viz/service/display_embedder/software_output_device_win.cc b/components/viz/service/display_embedder/software_output_device_win.cc
+index 9416ec929bebcff7f07088e635376ef232eb515f..1bc11f194b2558b4f8242cce510478ef85aa470d 100644
+--- a/components/viz/service/display_embedder/software_output_device_win.cc
++++ b/components/viz/service/display_embedder/software_output_device_win.cc
+@@ -211,21 +211,103 @@ void SoftwareOutputDeviceWinProxy::DrawAck() {
+     std::move(swap_ack_callback_).Run();
+ }
+ 
++SoftwareOutputDeviceWinChild::SoftwareOutputDeviceWinChild(
++    SoftwareOutputChildWindowWin child_window,
++    OutputDeviceBacking* backing)
++    : SoftwareOutputDeviceWinBase(child_window.window()),
++      child_window_(std::move(child_window)),
++      backing_(backing) {
++  backing_->RegisterClient(this);
++}
++
++SoftwareOutputDeviceWinChild::~SoftwareOutputDeviceWinChild() {
++  backing_->UnregisterClient(this);
++}
++
++void SoftwareOutputDeviceWinChild::ResizeDelegated() {
++  canvas_.reset();
++  backing_->ClientResized();
++}
++
++SkCanvas* SoftwareOutputDeviceWinChild::BeginPaintDelegated() {
++  if (!canvas_) {
++    // Share pixel backing with other
++		// SoftwareOutputDeviceWinDirect/Child instances.
++    // All work happens on the same thread so this is safe.
++    base::UnsafeSharedMemoryRegion* region =
++        backing_->GetSharedMemoryRegion(viewport_pixel_size_);
++    if (region && region->IsValid()) {
++      canvas_ = skia::CreatePlatformCanvasWithSharedSection(
++          viewport_pixel_size_.width(), viewport_pixel_size_.height(), true,
++          region->GetPlatformHandle(), skia::CRASH_ON_FAILURE);
++    }
++  }
++  return canvas_.get();
++}
++
++void SoftwareOutputDeviceWinChild::EndPaintDelegated(
++    const gfx::Rect& damage_rect) {
++  if (!canvas_)
++    return;
++
++  HDC dib_dc = skia::GetNativeDrawingContext(canvas_.get());
++  RECT src_rect = damage_rect.ToRECT();
++
++  RECT wr;
++  ::GetWindowRect(hwnd(), &wr);
++
++  SIZE size = {wr.right - wr.left, wr.bottom - wr.top};
++  POINT position = {0, 0};
++  POINT zero = {0, 0};
++  BLENDFUNCTION blend = {AC_SRC_OVER, 0x00, 0xFF, AC_SRC_ALPHA};
++
++  UPDATELAYEREDWINDOWINFO info = {};
++  info.cbSize = sizeof(UPDATELAYEREDWINDOWINFO);
++  info.hdcDst = nullptr;
++  info.pptDst = &position;
++  info.psize = &size;
++  info.hdcSrc = dib_dc;
++  info.pptSrc = &zero;
++  info.crKey = RGB(0xFF, 0xFF, 0xFF);
++  info.pblend = &blend;
++  info.dwFlags = ULW_ALPHA;
++  info.prcDirty = &src_rect;
++
++  ::UpdateLayeredWindowIndirect(hwnd(), &info);
++}
++
++const gfx::Size& SoftwareOutputDeviceWinChild::GetViewportPixelSize() const {
++  return viewport_pixel_size_;
++}
++
++void SoftwareOutputDeviceWinChild::ReleaseCanvas() {
++  canvas_.reset();
++}
++
+ std::unique_ptr<SoftwareOutputDevice> CreateSoftwareOutputDeviceWin(
+     HWND hwnd,
+     OutputDeviceBacking* backing,
+-    mojom::DisplayClient* display_client) {
++    mojom::DisplayClient* display_client,
++    GpuServiceImpl* gpu_service_impl) {
+   if (NeedsToUseLayerWindow(hwnd)) {
+-    DCHECK(display_client);
++    SoftwareOutputChildWindowWin child_window(hwnd);
++    child_window.Initialize();
++
++    auto device = std::make_unique<SoftwareOutputDeviceWinChild>(
++        std::move(child_window), backing);
++    gpu_service_impl->SendCreatedChildWindow(hwnd, device->hwnd());
++    return device;
++
++    //DCHECK(display_client);
+ 
+     // Setup mojom::LayeredWindowUpdater implementation in the browser process
+     // to draw to the HWND.
+-    mojo::PendingRemote<mojom::LayeredWindowUpdater> layered_window_updater;
+-    display_client->CreateLayeredWindowUpdater(
+-        layered_window_updater.InitWithNewPipeAndPassReceiver());
++    //mojo::PendingRemote<mojom::LayeredWindowUpdater> layered_window_updater;
++    //display_client->CreateLayeredWindowUpdater(
++    //    layered_window_updater.InitWithNewPipeAndPassReceiver());
+ 
+-    return std::make_unique<SoftwareOutputDeviceWinProxy>(
+-        hwnd, std::move(layered_window_updater));
++    //return std::make_unique<SoftwareOutputDeviceWinProxy>(
++    //    hwnd, std::move(layered_window_updater));
+   } else {
+     return std::make_unique<SoftwareOutputDeviceWinDirect>(hwnd, backing);
+   }
+diff --git a/components/viz/service/display_embedder/software_output_device_win.h b/components/viz/service/display_embedder/software_output_device_win.h
+index 31b69c96fc6f46c0e5d8be7ddc04760ff7b4e7f2..d758e9b4d2f3c9bfb81bb53e32ee0923092478bc 100644
+--- a/components/viz/service/display_embedder/software_output_device_win.h
++++ b/components/viz/service/display_embedder/software_output_device_win.h
+@@ -13,6 +13,8 @@
+ #include "base/threading/thread_checker.h"
+ #include "components/viz/service/display/software_output_device.h"
+ #include "components/viz/service/display_embedder/output_device_backing.h"
++#include "components/viz/service/display_embedder/software_output_child_window_win.h"
++#include "components/viz/service/gl/gpu_service_impl.h"
+ #include "components/viz/service/viz_service_export.h"
+ #include "mojo/public/cpp/bindings/remote.h"
+ #include "services/viz/privileged/mojom/compositing/display_private.mojom.h"
+@@ -111,11 +113,40 @@ class VIZ_SERVICE_EXPORT SoftwareOutputDeviceWinProxy
+   base::OnceClosure swap_ack_callback_;
+ };
+ 
++// SoftwareOutputDevice implementation that creates a child window of the
++// provided HWND and draws on the window directly using layered window API.
++// The backing buffer for paint is shared for all instances of this and 
++// SoftwareOutputDeviceWinDirect classes.
++class VIZ_SERVICE_EXPORT SoftwareOutputDeviceWinChild
++    : public SoftwareOutputDeviceWinBase,
++      public OutputDeviceBacking::Client {
++ public:
++  SoftwareOutputDeviceWinChild(
++    SoftwareOutputChildWindowWin child_window,
++    OutputDeviceBacking* backing);
++  ~SoftwareOutputDeviceWinChild() override;
++
++  // SoftwareOutputDeviceWinBase implementation.
++  void ResizeDelegated() override;
++  SkCanvas* BeginPaintDelegated() override;
++  void EndPaintDelegated(const gfx::Rect& damage_rect) override;
++
++  // OutputDeviceBacking::Client implementation.
++  const gfx::Size& GetViewportPixelSize() const override;
++  void ReleaseCanvas() override;
++
++ private:
++  const SoftwareOutputChildWindowWin child_window_;
++  const raw_ptr<OutputDeviceBacking> backing_;
++  std::unique_ptr<SkCanvas> canvas_;
++};
++
+ // Creates an appropriate SoftwareOutputDevice implementation.
+ VIZ_SERVICE_EXPORT std::unique_ptr<SoftwareOutputDevice>
+ CreateSoftwareOutputDeviceWin(HWND hwnd,
+                               OutputDeviceBacking* backing,
+-                              mojom::DisplayClient* display_client);
++                              mojom::DisplayClient* display_client,
++                              GpuServiceImpl* gpu_service_impl);
+ 
+ }  // namespace viz
+ 
